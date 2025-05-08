@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.ipynb_checkpoints
+*.egg-info/
+liquidity_snapshots.parquet
+# Streamlit cache
+.streamlit/
+.cache/
+*.parquet
+
+# Environments
+.env
+.venv/
+venv/
+
+# System
+.DS_Store
