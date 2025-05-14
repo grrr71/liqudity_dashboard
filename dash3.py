@@ -127,23 +127,35 @@ def fetch_trade_volume_1h(token_id):
         
         if "data" in data:
             trades = []
-            # Process maker orders (we give token, receive USDC)
+            # Process maker orders (our token is the maker)
             if "makerOrders" in data["data"]:
                 for trade in data["data"]["makerOrders"]:
+                    # When we're the maker, we give up our token and receive USDC
+                    # USDC has 6 decimal places
+                    usdc_amount = float(trade["takerAmountFilled"]) / 1_000_000
+                    token_amount = float(trade["makerAmountFilled"])
                     trades.append({
-                        "usdc_amount": float(trade["takerAmountFilled"]),  # USDC we receive
-                        "token_amount": float(trade["makerAmountFilled"]),  # Token we give
+                        "usdc_volume": usdc_amount,  # USDC we receive
+                        "token_volume": token_amount,  # Token we give
                         "timestamp": trade["timestamp"],
-                        "side": "sell"  # We're selling our token
+                        "role": "maker",
+                        "side": "sell",  # We're selling our token
+                        "implied_price": usdc_amount / token_amount if token_amount > 0 else 0  # USDC per token
                     })
-            # Process taker orders (we give USDC, receive token)
+            # Process taker orders (our token is the taker)
             if "takerOrders" in data["data"]:
                 for trade in data["data"]["takerOrders"]:
+                    # When we're the taker, we give up USDC and receive our token
+                    # USDC has 6 decimal places
+                    usdc_amount = float(trade["takerAmountFilled"]) / 1_000_000
+                    token_amount = float(trade["makerAmountFilled"])
                     trades.append({
-                        "usdc_amount": float(trade["takerAmountFilled"]),  # USDC we give
-                        "token_amount": float(trade["makerAmountFilled"]),  # Token we receive
+                        "usdc_volume": usdc_amount,  # USDC we give
+                        "token_volume": token_amount,  # Token we receive
                         "timestamp": trade["timestamp"],
-                        "side": "buy"  # We're buying our token
+                        "role": "taker",
+                        "side": "buy",  # We're buying our token
+                        "implied_price": usdc_amount / token_amount if token_amount > 0 else 0  # USDC per token
                     })
             return trades
         else:
@@ -206,23 +218,35 @@ def fetch_historical_trades(token_id, hours=24):
         
         if "data" in data:
             trades = []
-            # Process maker orders (we give token, receive USDC)
+            # Process maker orders (our token is the maker)
             if "makerOrders" in data["data"]:
                 for trade in data["data"]["makerOrders"]:
+                    # When we're the maker, we give up our token and receive USDC
+                    # USDC has 6 decimal places
+                    usdc_amount = float(trade["takerAmountFilled"]) / 1_000_000
+                    token_amount = float(trade["makerAmountFilled"])
                     trades.append({
-                        "usdc_amount": float(trade["takerAmountFilled"]),  # USDC we receive
-                        "token_amount": float(trade["makerAmountFilled"]),  # Token we give
+                        "usdc_volume": usdc_amount,  # USDC we receive
+                        "token_volume": token_amount,  # Token we give
                         "timestamp": trade["timestamp"],
-                        "side": "sell"  # We're selling our token
+                        "role": "maker",
+                        "side": "sell",  # We're selling our token
+                        "implied_price": usdc_amount / token_amount if token_amount > 0 else 0  # USDC per token
                     })
-            # Process taker orders (we give USDC, receive token)
+            # Process taker orders (our token is the taker)
             if "takerOrders" in data["data"]:
                 for trade in data["data"]["takerOrders"]:
+                    # When we're the taker, we give up USDC and receive our token
+                    # USDC has 6 decimal places
+                    usdc_amount = float(trade["takerAmountFilled"]) / 1_000_000
+                    token_amount = float(trade["makerAmountFilled"])
                     trades.append({
-                        "usdc_amount": float(trade["takerAmountFilled"]),  # USDC we give
-                        "token_amount": float(trade["makerAmountFilled"]),  # Token we receive
+                        "usdc_volume": usdc_amount,  # USDC we give
+                        "token_volume": token_amount,  # Token we receive
                         "timestamp": trade["timestamp"],
-                        "side": "buy"  # We're buying our token
+                        "role": "taker",
+                        "side": "buy",  # We're buying our token
+                        "implied_price": usdc_amount / token_amount if token_amount > 0 else 0  # USDC per token
                     })
             return trades
         else:
@@ -245,13 +269,18 @@ def calculate_trade_metrics(trades):
     """Calculate various trade metrics"""
     if not trades:
         return {
-            'volume': 0,
+            'total_volume': 0,
+            'usdc_volume': 0,
+            'token_volume': 0,
             'trade_count': 0,
             'avg_trade_size': 0,
             'largest_trade': 0,
-            'volume_by_hour': pd.DataFrame(columns=['hour', 'usdc_amount']),
+            'volume_by_hour': pd.DataFrame(columns=['hour', 'usdc_volume']),
             'buy_volume': 0,
-            'sell_volume': 0
+            'sell_volume': 0,
+            'maker_volume': 0,
+            'taker_volume': 0,
+            'avg_price': 0
         }
     
     # Convert trades to DataFrame
@@ -259,27 +288,41 @@ def calculate_trade_metrics(trades):
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
     
     # Calculate metrics
-    volume = df['usdc_amount'].sum()
+    usdc_volume = df['usdc_volume'].sum()
+    token_volume = df['token_volume'].sum()
+    total_volume = usdc_volume + token_volume
     trade_count = len(df)
-    avg_trade_size = volume / trade_count if trade_count > 0 else 0
-    largest_trade = df['usdc_amount'].max()
+    avg_trade_size = usdc_volume / trade_count if trade_count > 0 else 0
+    largest_trade = df['usdc_volume'].max()
     
     # Calculate buy/sell volumes
-    buy_volume = df[df['side'] == 'buy']['usdc_amount'].sum()
-    sell_volume = df[df['side'] == 'sell']['usdc_amount'].sum()
+    buy_volume = df[df['side'] == 'buy']['usdc_volume'].sum()
+    sell_volume = df[df['side'] == 'sell']['usdc_volume'].sum()
+    
+    # Calculate maker/taker volumes
+    maker_volume = df[df['role'] == 'maker']['usdc_volume'].sum()
+    taker_volume = df[df['role'] == 'taker']['usdc_volume'].sum()
+    
+    # Calculate average price
+    avg_price = df['implied_price'].mean()
     
     # Calculate hourly volume
     df['hour'] = df['timestamp'].dt.floor('H')
-    volume_by_hour = df.groupby('hour')['usdc_amount'].sum().reset_index()
+    volume_by_hour = df.groupby('hour')['usdc_volume'].sum().reset_index()
     
     return {
-        'volume': volume,
+        'total_volume': total_volume,
+        'usdc_volume': usdc_volume,
+        'token_volume': token_volume,
         'trade_count': trade_count,
         'avg_trade_size': avg_trade_size,
         'largest_trade': largest_trade,
         'volume_by_hour': volume_by_hour,
         'buy_volume': buy_volume,
-        'sell_volume': sell_volume
+        'sell_volume': sell_volume,
+        'maker_volume': maker_volume,
+        'taker_volume': taker_volume,
+        'avg_price': avg_price
     }
 
 # ---- DuckDB Setup ---- #
@@ -643,9 +686,9 @@ elif page == "Liquidity Analyzer":
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric(
-                        "1h Volume",
-                        format_volume(metrics_1h['volume']),
-                        help="Total trading volume in the last hour"
+                        "1h USDC Volume",
+                        format_volume(metrics_1h['usdc_volume']),
+                        help="Total USDC trading volume in the last hour"
                     )
                 with col2:
                     st.metric(
@@ -666,8 +709,9 @@ elif page == "Liquidity Analyzer":
                         help="Largest single trade in the last hour"
                     )
                 
-                # Add buy/sell volume metrics
-                col1, col2 = st.columns(2)
+                # Add buy/sell and maker/taker metrics
+                st.markdown("#### Trade Flow Analysis")
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric(
                         "Buy Volume",
@@ -680,44 +724,184 @@ elif page == "Liquidity Analyzer":
                         format_volume(metrics_1h['sell_volume']),
                         help="Volume of sell trades in the last hour"
                     )
+                with col3:
+                    st.metric(
+                        "Maker Volume",
+                        format_volume(metrics_1h['maker_volume']),
+                        help="Volume where our token was the maker"
+                    )
+                with col4:
+                    st.metric(
+                        "Taker Volume",
+                        format_volume(metrics_1h['taker_volume']),
+                        help="Volume where our token was the taker"
+                    )
+
+                # 24-Hour Trade Analysis
+                st.markdown("#### 24-Hour Trade Analysis")
                 
-                # Historical Volume Chart
-                if len(metrics_24h['volume_by_hour']) > 0:
-                    st.markdown("#### 24h Volume Trend")
+                if trades_24h:
+                    # Convert trades to DataFrame for analysis
+                    df_24h = pd.DataFrame(trades_24h)
+                    df_24h['timestamp'] = pd.to_datetime(df_24h['timestamp'], unit='s')
+                    df_24h['hour'] = df_24h['timestamp'].dt.floor('H')
+                    
+                    # 1. Volume and Price Over Time
+                    st.markdown("##### Volume and Price Trends")
+                    hourly_data = df_24h.groupby('hour').agg({
+                        'usdc_volume': 'sum',
+                        'implied_price': 'mean',
+                        'token_volume': 'sum'
+                    }).reset_index()
+                    
                     fig = go.Figure()
+                    # Add volume bars
                     fig.add_trace(go.Bar(
-                        x=metrics_24h['volume_by_hour']['hour'],
-                        y=metrics_24h['volume_by_hour']['usdc_amount'],
-                        name='Hourly Volume'
+                        x=hourly_data['hour'],
+                        y=hourly_data['usdc_volume'],
+                        name='Volume (USDC)',
+                        yaxis='y1'
                     ))
+                    # Add price line
+                    fig.add_trace(go.Scatter(
+                        x=hourly_data['hour'],
+                        y=hourly_data['implied_price'],
+                        name='Price (USDC)',
+                        yaxis='y2',
+                        line=dict(color='red')
+                    ))
+                    
                     fig.update_layout(
-                        title='Trading Volume by Hour',
+                        title='Hourly Volume and Price',
                         xaxis_title='Hour',
                         yaxis_title='Volume (USDC)',
+                        yaxis2=dict(
+                            title='Price (USDC)',
+                            overlaying='y',
+                            side='right'
+                        ),
                         template='simple_white',
                         height=400,
-                        yaxis=dict(
-                            tickformat='$,.0f'
+                        showlegend=True,
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.02,
+                            xanchor="right",
+                            x=1
                         )
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                
-                # Trade Size Distribution
-                if trades_24h:
-                    st.markdown("#### Trade Size Distribution")
-                    trade_sizes = [float(trade['usdc_amount']) for trade in trades_24h]
-                    fig = px.histogram(
-                        x=trade_sizes,
-                        nbins=30,
-                        title='Distribution of Trade Sizes',
-                        labels={'x': 'Trade Size (USDC)', 'y': 'Count'}
-                    )
-                    fig.update_layout(
-                        xaxis=dict(
-                            tickformat='$,.0f'
+                    
+                    # 2. Trade Size Distribution
+                    st.markdown("##### Trade Size Distribution")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Trade size histogram
+                        fig = px.histogram(
+                            df_24h,
+                            x='usdc_volume',
+                            nbins=30,
+                            title='Distribution of Trade Sizes',
+                            labels={'usdc_volume': 'Trade Size (USDC)', 'count': 'Number of Trades'}
                         )
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                        fig.update_layout(
+                            xaxis=dict(tickformat='$,.0f'),
+                            height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        # Cumulative volume by trade size
+                        df_sorted = df_24h.sort_values('usdc_volume')
+                        df_sorted['cumulative_volume'] = df_sorted['usdc_volume'].cumsum()
+                        df_sorted['cumulative_pct'] = df_sorted['cumulative_volume'] / df_sorted['usdc_volume'].sum() * 100
+                        
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(
+                            x=df_sorted['usdc_volume'],
+                            y=df_sorted['cumulative_pct'],
+                            mode='lines',
+                            name='Cumulative Volume'
+                        ))
+                        fig.update_layout(
+                            title='Cumulative Volume by Trade Size',
+                            xaxis_title='Trade Size (USDC)',
+                            yaxis_title='Cumulative Volume (%)',
+                            xaxis=dict(tickformat='$,.0f'),
+                            height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 3. Trade Flow Analysis
+                    st.markdown("##### Trade Flow Analysis")
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Buy vs Sell Volume Over Time
+                        hourly_side = df_24h.groupby(['hour', 'side'])['usdc_volume'].sum().reset_index()
+                        fig = px.bar(
+                            hourly_side,
+                            x='hour',
+                            y='usdc_volume',
+                            color='side',
+                            title='Buy vs Sell Volume Over Time',
+                            labels={'usdc_volume': 'Volume (USDC)', 'side': 'Trade Side'}
+                        )
+                        fig.update_layout(
+                            yaxis=dict(tickformat='$,.0f'),
+                            height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        # Maker vs Taker Volume Over Time
+                        hourly_role = df_24h.groupby(['hour', 'role'])['usdc_volume'].sum().reset_index()
+                        fig = px.bar(
+                            hourly_role,
+                            x='hour',
+                            y='usdc_volume',
+                            color='role',
+                            title='Maker vs Taker Volume Over Time',
+                            labels={'usdc_volume': 'Volume (USDC)', 'role': 'Trade Role'}
+                        )
+                        fig.update_layout(
+                            yaxis=dict(tickformat='$,.0f'),
+                            height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 4. Summary Statistics
+                    st.markdown("##### 24-Hour Summary Statistics")
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric(
+                            "Total Volume",
+                            format_volume(metrics_24h['usdc_volume']),
+                            help="Total trading volume in the last 24 hours"
+                        )
+                    with col2:
+                        st.metric(
+                            "Total Trades",
+                            f"{metrics_24h['trade_count']:,}",
+                            help="Total number of trades in the last 24 hours"
+                        )
+                    with col3:
+                        st.metric(
+                            "Avg Price",
+                            f"${metrics_24h['avg_price']:.4f}",
+                            help="Average price in the last 24 hours"
+                        )
+                    with col4:
+                        st.metric(
+                            "Price Range",
+                            f"${df_24h['implied_price'].min():.4f} - ${df_24h['implied_price'].max():.4f}",
+                            help="Price range in the last 24 hours"
+                        )
+                else:
+                    st.warning("No trade data available for the last 24 hours")
 
             # Raw Data
             with st.expander("🧾 Raw Data", expanded=False):
