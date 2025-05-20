@@ -6,6 +6,7 @@ import duckdb
 from datetime import datetime, timedelta
 import numpy as np
 import requests
+from scipy.stats import norm, multivariate_normal
 
 st.set_page_config(page_title="Polymarket Liquidity Toolkit", layout="wide")
 
@@ -393,7 +394,7 @@ with col2:
         get_latest_snapshot.clear()
         st.rerun()
 
-page = st.sidebar.radio("📂 Navigate", ["Liquidity Explorer", "Liquidity Analyzer"])
+page = st.sidebar.radio("📂 Navigate", ["Parlays","Liquidity Explorer", "Liquidity Analyzer"])
 
 # ---- Liquidity Explorer ---- #
 if page == "Liquidity Explorer":
@@ -906,5 +907,380 @@ elif page == "Liquidity Analyzer":
             # Raw Data
             with st.expander("🧾 Raw Data", expanded=False):
                 st.dataframe(df_filtered.tail(100), use_container_width=True, height=400)
+
+# ---- Parlays (Combinatorial Analysis) ---- #
+if page == "Parlays":
+    st.markdown("# 🎲 Parlays: Combinatorial Market Analysis")
+    st.markdown("""
+    Select 2 or 3 outcomes (legs) to analyze their joint behavior, correlation, and early warning signals. Add extra info or similarity tags to enrich the analysis.
+    """)
+
+    # Only use latest snapshot for open/active markets
+    open_markets = latest_df.copy()
+    if 'closed' in open_markets.columns:
+        open_markets = open_markets[open_markets['closed'] == False]
+    if 'active' in open_markets.columns:
+        open_markets = open_markets[open_markets['active'] == True]
+
+    # Build selector DataFrame
+    outcomes_df = open_markets[['market_id', 'question', 'outcome_name', 'token_id']].drop_duplicates()
+    outcomes_df['label'] = outcomes_df['question'] + ' | ' + outcomes_df['outcome_name']
+
+    # Default choices for 3 legs
+    default_legs = [
+        'Russia x Ukraine ceasefire in 2025? | No',
+        'US recession in 2025? | No',
+        'US-Iran nuclear deal in 2025? | No'
+    ]
+    selected_legs = st.multiselect(
+        "Select 2 or 3 outcomes (legs) to combine:",
+        options=outcomes_df['label'],
+        default=[l for l in default_legs if l in outcomes_df['label'].tolist()],
+        max_selections=3
+    )
+
+    if len(selected_legs) < 2:
+        st.info("Select at least 2 outcomes to analyze a parlay.")
+        st.stop()
+
+    selected_rows = outcomes_df[outcomes_df['label'].isin(selected_legs)]
+
+    # 2. Only fetch time series data for selected legs
+    st.markdown("## Selected Legs")
+    stats = []
+    time_series_data = {}
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    for _, row in selected_rows.iterrows():
+        # Get latest snapshot for this token_id
+        latest = latest_df[latest_df['token_id'] == row['token_id']]
+        # Fetch time series only for selected legs
+        df = get_filtered_data(row['market_id'], row['outcome_name'], cutoff.isoformat())
+        if not df.empty:
+            df = df.sort_values('timestamp')
+            time_series_data[row['label']] = df
+            # Get beginning and end prices from the time series
+            first_price = df.iloc[0].get('mid_price', np.nan)
+            last_price = df.iloc[-1].get('mid_price', np.nan)
+            price_change = last_price - first_price if not np.isnan(first_price) and not np.isnan(last_price) else np.nan
+
+            if not latest.empty:
+                latest = latest.iloc[0]
+                stats.append({
+                    'Market': row['question'],
+                    'Outcome': row['outcome_name'],
+                    'Current Price': latest.get('mid_price', float('nan')),
+                    'Start Price': first_price,
+                    'End Price': last_price,
+                    'Price Change': price_change,
+                    '24h Volume': latest.get('volume24hr', float('nan')),
+                    'Bid Slope 5': latest.get('bid_slope_5', float('nan')),
+                    'Ask Slope 5': latest.get('ask_slope_5', float('nan')),
+                    'Order Book Imbalance': latest.get('order_book_imbalance', float('nan')),
+                    'Timestamp': latest.get('timestamp', None)
+                })
+            else:
+                stats.append({
+                    'Market': row['question'],
+                    'Outcome': row['outcome_name'],
+                    'Current Price': None,
+                    'Start Price': first_price,
+                    'End Price': last_price,
+                    'Price Change': price_change,
+                    '24h Volume': None,
+                    'Bid Slope 5': None,
+                    'Ask Slope 5': None,
+                    'Order Book Imbalance': None,
+                    'Timestamp': None
+                })
+        else:
+            # Handle cases with no data in the time window
+            if not latest.empty:
+                latest = latest.iloc[0]
+                stats.append({
+                    'Market': row['question'],
+                    'Outcome': row['outcome_name'],
+                    'Current Price': latest.get('mid_price', float('nan')),
+                    'Start Price': np.nan,
+                    'End Price': np.nan,
+                    'Price Change': np.nan,
+                    '24h Volume': latest.get('volume24hr', float('nan')),
+                    'Bid Slope 5': latest.get('bid_slope_5', float('nan')),
+                    'Ask Slope 5': latest.get('ask_slope_5', float('nan')),
+                    'Order Book Imbalance': latest.get('order_book_imbalance', float('nan')),
+                    'Timestamp': latest.get('timestamp', None)
+                })
+            else:
+                stats.append({
+                    'Market': row['question'],
+                    'Outcome': row['outcome_name'],
+                    'Current Price': None,
+                    'Start Price': np.nan,
+                    'End Price': np.nan,
+                    'Price Change': np.nan,
+                    '24h Volume': None,
+                    'Bid Slope 5': None,
+                    'Ask Slope 5': None,
+                    'Order Book Imbalance': None,
+                    'Timestamp': None
+                })
+
+    st.dataframe(pd.DataFrame(stats), use_container_width=True)
+
+    # Show data points per leg and warn if any leg has zero data (redundant with time range info, can remove)
+    # data_points_info = []
+    # for label, df in time_series_data.items():
+    #     data_points_info.append({'Leg': label, 'Data Points': len(df)})
+    # st.dataframe(pd.DataFrame(data_points_info))
+    # if any(len(df) == 0 for df in time_series_data.values()):
+    #     st.warning("One or more selected legs have no price history in the selected window. Try a different outcome or a longer time window.")
+
+    # 3. Rolling log-odds returns and correlation
+    st.markdown("## Rolling Correlation & Early Signals")
+    st.markdown(
+        """
+        _Note: Data is downsampled to 10-minute intervals (averaged within each bin) before correlation is computed. This smooths the series and reduces noise from irregular snapshot times._
+        """
+    )
+    window_size = st.slider("Rolling Window (minutes)", 10, 240, 60, step=10)
+    price_series = {}
+    for label, df in time_series_data.items():
+        # Resample to 10-minute bins, interpolate missing
+        ts = pd.Series(df['mid_price'].values, index=pd.to_datetime(df['timestamp']))
+        ts = ts.resample('10T').mean().interpolate()
+        q = ts.clip(0.001, 0.999)
+        log_odds = np.log(q / (1 - q))
+        price_series[label] = log_odds
+    if len(price_series) >= 2:
+        # Build a common timeline for all legs
+        start = max(series.index[0] for series in price_series.values())
+        end = min(series.index[-1] for series in price_series.values())
+        common_index = pd.date_range(start, end, freq='10T')
+        # Reindex all series to the common timeline
+        for label in price_series:
+            price_series[label] = price_series[label].reindex(common_index).interpolate()
+        aligned = pd.DataFrame(price_series)
+        aligned = aligned.dropna()
+        if not aligned.empty:
+            if aligned.shape[1] == 2:
+                # Special case: exactly two legs, compute rolling correlation directly
+                col1, col2 = aligned.columns
+                rolling_corr = aligned[col1].rolling(window=window_size, min_periods=2).corr(aligned[col2])
+                plot_df = pd.DataFrame({f"{col1} vs {col2}": rolling_corr})
+                plot_df = plot_df.dropna()
+                if not plot_df.empty:
+                    fig = px.line(plot_df, x=plot_df.index, y=plot_df.columns)
+                    fig.update_layout(
+                        xaxis_title='Timestamp',
+                        yaxis_title='Rolling Correlation',
+                        xaxis=dict(
+                            tickformat='%Y-%m-%d %H:%M',
+                            type='date'
+                        ),
+                        height=400,
+                        template='simple_white'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No valid correlation data to plot.")
+                # Compute and display summary metrics
+                corr_summary = {}
+                for col in plot_df.columns:
+                    series = plot_df[col].dropna()
+                    if not series.empty:
+                        corr_summary[col] = {
+                            'mean': series.mean(),
+                            'max': series.max(),
+                            'min': series.min(),
+                            'std': series.std()
+                        }
+                if corr_summary:
+                    st.markdown("### Correlation Summary Metrics")
+                    st.dataframe(pd.DataFrame(corr_summary).T)
+                st.markdown("**Interpretation:** Spikes in correlation may indicate legs are syncing up (less independent).")
+            elif aligned.shape[1] == 3:
+                # 3 legs: show correlation matrix and copula analysis
+                st.markdown('### Latest Correlation Matrix')
+                corr_matrix = aligned.tail(window_size).corr()
+                st.dataframe(corr_matrix)
+                st.markdown('### Copula-Implied Joint Probability Analysis')
+                # Compute Copula-Implied and Product Probabilities Over Time
+                copula_product_data = []
+                for i in range(window_size - 1, len(aligned)):
+                    current_aligned = aligned.iloc[:i+1]
+                    if len(current_aligned) >= window_size:
+                        # Compute rolling correlation matrix up to this point
+                        current_corr_matrix = current_aligned.tail(window_size).corr()
+                        # Get latest prices (marginals) up to this point
+                        current_marginals = current_aligned.iloc[-1].values
+                        # Compute product of marginals
+                        current_product = np.prod(current_marginals)
+                        # Compute copula-implied probability
+                        try:
+                            # Convert probabilities to quantiles
+                            quantiles = [norm.ppf(q) for q in current_marginals]
+                            implied = multivariate_normal.cdf(quantiles, mean=[0,0,0], cov=current_corr_matrix.values)
+                        except Exception:
+                            implied = np.nan # Handle potential errors (e.g., singular matrix)
+
+                        copula_product_data.append({
+                            'timestamp': current_aligned.index[-1],
+                            'Copula Implied': implied,
+                            'Product of Marginals': current_product
+                        })
+
+                copula_product_df = pd.DataFrame(copula_product_data).set_index('timestamp')
+
+                if not copula_product_df.empty:
+                    # Plot Copula vs Product Over Time
+                    fig_copula_product = px.line(
+                        copula_product_df,
+                        x=copula_product_df.index,
+                        y=copula_product_df.columns,
+                        title='Copula-Implied vs Product Probability Over Time',
+                        labels={'value': 'Probability', 'variable': 'Method'}
+                    )
+                    fig_copula_product.update_layout(height=400, template='simple_white')
+                    st.plotly_chart(fig_copula_product, use_container_width=True)
+
+                    # Show latest comparison
+                    latest_implied = copula_product_df['Copula Implied'].iloc[-1] if 'Copula Implied' in copula_product_df.columns else np.nan
+                    latest_product = copula_product_df['Product of Marginals'].iloc[-1] if 'Product of Marginals' in copula_product_df.columns else np.nan
+                    latest_marginals = current_marginals if len(current_marginals) > 0 else [np.nan, np.nan, np.nan]
+
+                    if not np.isnan(latest_implied) and not np.isnan(latest_product):
+                        st.markdown(f'**Latest Copula-implied:** {latest_implied:.4f}')
+                        st.markdown(f'**Latest Product of marginals:** {latest_product:.4f}')
+                        st.markdown(f'**Latest Marginal Probabilities:** {latest_marginals}')
+                        st.markdown(
+                            """
+                            *Interpretation of Copula = 0:* A copula probability of 0 (or near 0) suggests that based on the latest prices and correlations, the joint outcome is estimated to be extremely unlikely. Check the 'Current Price' for each leg and the 'Latest Correlation Matrix' above for potential reasons (e.g., very low individual prices, strong negative correlations).
+                            """
+                        )
+                        if latest_implied > latest_product:
+                            st.success('Implied > Product: Positive dependence (tail risk ↑)')
+                        else:
+                            st.info('Implied < Product: Negative dependence (tail risk ↓)')
+                    else:
+                        st.warning("Could not compute latest copula metrics.")
+
+                else:
+                    st.warning("Not enough data to compute Copula vs Product over time.")
+
+            else:
+                # 4+ legs: use pairwise DataFrame logic as before
+                rolling_corr = aligned.rolling(window=window_size, min_periods=2).corr(pairwise=True)
+                if hasattr(rolling_corr.columns, 'nlevels') and rolling_corr.columns.nlevels > 1:
+                    # MultiIndex: flatten and plot all pairs
+                    plot_df = pd.DataFrame()
+                    for col in rolling_corr.columns.get_level_values(0).unique():
+                        for col2 in rolling_corr.columns.get_level_values(1).unique():
+                            if col != col2 and (col, col2) in rolling_corr.columns:
+                                pair_label = f"{col} vs {col2}"
+                                plot_df[pair_label] = rolling_corr[(col, col2)]
+                else:
+                    # Single-level columns: plot directly
+                    plot_df = rolling_corr.copy()
+                    plot_df.columns = [str(c) for c in plot_df.columns]
+                # Clean up plot_df
+                plot_df = plot_df.dropna(how='all', axis=1)
+                plot_df = plot_df.dropna(how='all', axis=0)
+                # Ensure index is datetime
+                if not isinstance(plot_df.index, pd.DatetimeIndex):
+                    plot_df.index = pd.to_datetime(plot_df.index, errors='coerce')
+                plot_df = plot_df[plot_df.index.notnull()]
+                if not plot_df.empty and len(plot_df.columns) > 0 and len(plot_df) > 1:
+                    fig = px.line(plot_df, x=plot_df.index, y=plot_df.columns)
+                    fig.update_layout(
+                        xaxis_title='Timestamp',
+                        yaxis_title='Rolling Correlation',
+                        xaxis=dict(
+                            tickformat='%Y-%m-%d %H:%M',
+                            type='date'
+                        ),
+                        height=400,
+                        template='simple_white'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("No valid correlation data to plot.")
+                # Compute and display summary metrics
+                corr_summary = {}
+                for col in plot_df.columns:
+                    series = plot_df[col].dropna()
+                    if not series.empty:
+                        corr_summary[col] = {
+                            'mean': series.mean(),
+                            'max': series.max(),
+                            'min': series.min(),
+                            'std': series.std()
+                        }
+                if corr_summary:
+                    st.markdown("### Correlation Summary Metrics")
+                    st.dataframe(pd.DataFrame(corr_summary).T)
+                st.markdown("**Interpretation:** Spikes in correlation may indicate legs are syncing up (less independent).")
+        else:
+            st.warning("Not enough overlapping data to compute rolling correlation.")
+    else:
+        st.warning("Not enough price history for selected legs.")
+
+    # 4. Order book microstructure (spread, depth, imbalance) time series
+    st.markdown("## Order Book Microstructure (Early Signals)")
+    for label, df in time_series_data.items():
+        if not df.empty:
+            st.markdown(f"#### {label}")
+            df = df.copy()
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            # Only use numeric columns for resampling
+            numeric_cols = df.select_dtypes(include='number').columns
+            df_resampled = df.set_index('timestamp')[numeric_cols].resample('10T').mean().interpolate()
+            plot_col1, plot_col2 = st.columns(2)
+            with plot_col1:
+                # Spread Metrics: Dual Y-axis plot
+                fig1 = go.Figure()
+                if 'spread_platform' in df_resampled.columns:
+                    fig1.add_trace(go.Scatter(x=df_resampled.index, y=df_resampled['spread_platform'], name='Platform Spread', yaxis='y1', line=dict(color='blue')))
+                if 'bid_ask_spread' in df_resampled.columns:
+                    fig1.add_trace(go.Scatter(x=df_resampled.index, y=df_resampled['bid_ask_spread'], name='Bid-Ask Spread', yaxis='y2', line=dict(color='orange')))
+                fig1.update_layout(
+                    height=300,
+                    title='Spread Metrics',
+                    template='simple_white',
+                    xaxis=dict(title='Time'),
+                    yaxis=dict(title='Platform Spread', side='left'),
+                    yaxis2=dict(title='Bid-Ask Spread', overlaying='y', side='right'),
+                    legend=dict(x=0.01, y=0.99),
+                )
+                st.plotly_chart(fig1, use_container_width=True)
+            with plot_col2:
+                fig2 = go.Figure()
+                if 'depth_bid_1pct' in df_resampled.columns:
+                    fig2.add_trace(go.Scatter(x=df_resampled.index, y=df_resampled['depth_bid_1pct'], name='Bid Depth 1%'))
+                if 'depth_ask_1pct' in df_resampled.columns:
+                    fig2.add_trace(go.Scatter(x=df_resampled.index, y=df_resampled['depth_ask_1pct'], name='Ask Depth 1%'))
+                fig2.update_layout(height=300, title='Depth Metrics', template='simple_white')
+                st.plotly_chart(fig2, use_container_width=True)
+
+    # 5. User-added similarity tags and extra info
+    st.markdown("## Extra Info & Similarity Tags")
+    with st.form("extra_info_form"):
+        sentiment_flag = st.selectbox("News Sentiment Flag (same story?)", ["Unknown", "Yes", "No"])
+        macro_factor = st.text_input("Macro Factor (optional)", "")
+        similarity_tag = st.text_input("Similarity Tag (optional)", "")
+        submitted = st.form_submit_button("Save Info")
+        if submitted:
+            st.success("Extra info saved for this parlay (not persistent yet)")
+
+    # 6. Snapshot Time Range for Each Leg (moved to bottom)
+    st.markdown('### Snapshot Time Range for Each Leg')
+    for label, df in time_series_data.items():
+        if not df.empty:
+            st.write(f"{label}: {df['timestamp'].min()} to {df['timestamp'].max()} ({len(df)} points)")
+        else:
+            st.write(f"{label}: No data")
+
+    # Placeholder for Tail Risk Alert Score (moved to bottom)
+    st.markdown('### Tail Risk Alert Score (Placeholder)')
+    st.warning("Tail Risk Alert Score is not yet implemented. It will combine (Implied - Product) with a news-driven correlation bump.")
+    # You would add a plot here for the Tail Risk Score time series when implemented
 
             
